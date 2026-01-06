@@ -50,7 +50,7 @@ app.post('/upload', upload.single('image'), async (req, res, next) => {
         }
 
         // Optional: who uploaded this image (can send from frontend / Postman)
-        const userId = req.body.userId ? Number(req.body.userId) : null;
+        const userId = req.body.userId ? String(req.body.userId) : null;
 
         const { filename, originalname, mimetype, size } = req.file;
 
