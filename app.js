@@ -13,6 +13,17 @@ var usersRouter = require('./routes/users');
 const multer = require('multer');
 const pool = require('./db');
 
+const { checkJwt } = require("./jwt");
+
+// Replace 'YOUR_PUBLIC_KEY_STRING' with the actual key from the URL above
+//const secret = `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyPQ0pC2So+tSSl5rLhG4bfhuj13Dbp9H39jHW7Jh3AWduEBTVhFQc4lmdwmmX0DyYfK8HUEKPF83l2z0PbIDHAzIGHOJndrC/ua/e4hRBUZxtdJQKDxnyrLcWVnZ0tWd0CJxQUZH9TS+p0rkhO/7dRPy8KQBqrX9GGQ+KxBj01gsLJyoCCOU+g/MdahlPVQO9Xg34tPD3iHdnCvJhjWWT8tdJF4AurL53BOMKuzNJGwkdH62SKFNkZRS5ciNExGgfJeS7ufNgIAsGXCDWa311c7eIxgaLWmYUrcBuSG0UZ1iB4taTZtHhqDE23NCrJ+8AMjqQdRibNFfOIGXB/OPOwIDAQAB`;
+/*
+const checkJwt = auth({
+    audience: 'account',
+    issuerBaseURL: 'http://localhost:30086/realms/journal',
+    tokenSigningAlg: 'RS256',
+});
+*/
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, 'uploads/');                    // folder we created
@@ -43,30 +54,25 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
 
-app.post('/upload', upload.single('image'), async (req, res, next) => {
+app.post("/upload", checkJwt, upload.single("image"), async (req, res, next) => {
     try {
         if (!req.file) {
-            return res.status(400).json({ error: 'No file uploaded' });
+            return res.status(400).json({ message: "No file uploaded" });
         }
 
-        // Optional: who uploaded this image (can send from frontend / Postman)
-        const userId = req.body.userId ? String(req.body.userId) : null;
+        // Keycloak user id from token
+        const userId = req.auth.payload.sub;
 
         const { filename, originalname, mimetype, size } = req.file;
 
-        // Insert metadata into MySQL
         const [result] = await pool.execute(
-            `
-      INSERT INTO images (user_id, file_name, original_name, mime_type, size_bytes)
-      VALUES (?, ?, ?, ?, ?)
-      `,
+            `INSERT INTO images (user_id, file_name, original_name, mime_type, size_bytes)
+             VALUES (?, ?, ?, ?, ?)`,
             [userId, filename, originalname, mimetype, size]
         );
 
-        const recordId = result.insertId;
-
         res.json({
-            id: recordId,
+            id: result.insertId,
             userId,
             originalName: originalname,
             fileName: filename,
@@ -75,20 +81,20 @@ app.post('/upload', upload.single('image'), async (req, res, next) => {
             url: `/uploads/${filename}`,
         });
     } catch (err) {
-        console.error('Error saving image metadata:', err);
+        console.error("Error saving image metadata:", err);
         next(err);
     }
 });
 
-app.get('/image/by-original-name/:name', async (req, res, next) => {
+app.get("/image/by-original-name/:name", checkJwt, async (req, res, next) => {
     try {
         const originalName = req.params.name;
 
         const [rows] = await pool.execute(
             `SELECT id, user_id, file_name, original_name, mime_type, size_bytes, created_at
-       FROM images
-       WHERE original_name = ?
-       LIMIT 1`,
+             FROM images
+             WHERE original_name = ?
+                 LIMIT 1`,
             [originalName]
         );
 
@@ -98,7 +104,11 @@ app.get('/image/by-original-name/:name', async (req, res, next) => {
 
         const row = rows[0];
 
-        const result = {
+        // Optional: lock access to only the owner
+        // const userId = req.auth.payload.sub;
+        // if (row.user_id !== userId) return res.status(403).json({ message: "Forbidden" });
+
+        res.json({
             id: row.id,
             userId: row.user_id,
             originalName: row.original_name,
@@ -106,30 +116,28 @@ app.get('/image/by-original-name/:name', async (req, res, next) => {
             mimeType: row.mime_type,
             size: row.size_bytes,
             createdAt: row.created_at,
-            url: `/uploads/${row.file_name}`
-        };
-
-        res.json(result);
-
+            url: `/uploads/${row.file_name}`,
+        });
     } catch (err) {
         console.error("Error fetching image by name:", err);
         next(err);
     }
 });
 
-// PUT endpoint to replace an existing image
-app.put("/image/:originalName", upload.single("file"), async (req, res, next) => {
+app.put("/image/:originalName", checkJwt, upload.single("file"), async (req, res, next) => {
     try {
         const originalName = req.params.originalName;
-        const file = req.file;
 
-        if (!file) {
+        if (!req.file) {
             return res.status(400).json({ message: "No file uploaded" });
         }
 
-        // 1. Find the existing image by original_name
+        // Find existing record
         const [rows] = await pool.execute(
-            `SELECT id, file_name FROM images WHERE original_name = ? LIMIT 1`,
+            `SELECT id, user_id, file_name
+             FROM images
+             WHERE original_name = ?
+                 LIMIT 1`,
             [originalName]
         );
 
@@ -138,32 +146,35 @@ app.put("/image/:originalName", upload.single("file"), async (req, res, next) =>
         }
 
         const existing = rows[0];
-        const oldFilePath = path.join(__dirname, "uploads", existing.file_name);
 
-        // 2. Delete old file from disk (if it exists)
+        // Optional: only owner can replace
+        // const userId = req.auth.payload.sub;
+        // if (existing.user_id !== userId) return res.status(403).json({ message: "Forbidden" });
+
+        // Delete old file from disk
+        const oldFilePath = path.join(__dirname, "uploads", existing.file_name);
         if (fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
         }
 
-        // 3. Update database with new file info
+        // Update DB
         await pool.execute(
             `UPDATE images
        SET file_name = ?, mime_type = ?, size_bytes = ?
        WHERE id = ?`,
-            [file.filename, file.mimetype, file.size, existing.id]
+            [req.file.filename, req.file.mimetype, req.file.size, existing.id]
         );
 
-        // 4. Respond with updated info
         res.json({
             message: "Image replaced successfully",
             id: existing.id,
-            originalName: originalName,
-            fileName: file.filename,
-            mimeType: file.mimetype,
-            size: file.size,
-            url: "/uploads/" + file.filename
+            userId: existing.user_id,
+            originalName,
+            fileName: req.file.filename,
+            mimeType: req.file.mimetype,
+            size: req.file.size,
+            url: `/uploads/${req.file.filename}`,
         });
-
     } catch (err) {
         console.error("Error replacing image:", err);
         next(err);
@@ -177,15 +188,16 @@ app.use(function(req, res, next) {
 
 
 
+
 // error handler
 app.use(function(err, req, res, next) {
-  // set locals, only providing error in development
-  res.locals.message = err.message;
-  res.locals.error = req.app.get('env') === 'development' ? err : {};
+    // Add this line to see the real reason for the 401 in your terminal!
+    if (err.name === 'UnauthorizedError' || err.status === 401) {
+        console.error("JWT Validation Error:", err.message);
+    }
 
-  // render the error page
-  res.status(err.status || 500);
-  res.render('error');
+    res.status(err.status || 500);
+    res.json({ message: err.message }); // Return JSON instead of rendering a page
 });
 
 
