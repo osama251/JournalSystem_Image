@@ -7,7 +7,7 @@ const JWKS_URL = process.env.KEYCLOAK_JWKS_URL
 
 // What the token *claims* (your token's iss)
 const EXPECTED_ISSUER = process.env.KEYCLOAK_ISSUER
-    || "http://localhost:30086/realms/journal";
+    || "https://keycloakk.vm-app.cloud.cbh.kth.se/realms/journal";
 
 // Your audience check (often "account" for Keycloak default client,
 // but for frontend tokens it's usually your frontend clientId)
